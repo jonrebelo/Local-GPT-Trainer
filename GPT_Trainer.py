@@ -6,9 +6,11 @@ import random
 import pickle
 import argparse
 
+# Check if CUDA is available and if so, set the device accordingly
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(device)
 
+# Define the parameters for the model and training
 block_size = 320
 batch_size = 32
 max_iters = 10000
@@ -20,16 +22,18 @@ n_layer = 8
 n_head = 8
 dropout = 0.2
 
+# Read characters from the vocabulary file
 chars = ""
-with open("training_data/vocab.txt", "r", encoding = "utf-8") as f:
+with open("training_data/vocab.txt", "r", encoding="utf-8") as f:
     text = f.read()
     chars = sorted(list(set(text)))
 
 vocab_size = len(chars)
-string_to_int = { ch:i for i,ch in enumerate(chars) }
-int_to_string = { i:ch for i,ch in enumerate(chars) }
+string_to_int = {ch: i for i, ch in enumerate(chars)}
+int_to_string = {i: ch for i, ch in enumerate(chars)}
 encode = lambda s: [string_to_int[c] for c in s]
 decode = lambda l: ''.join([int_to_string[i] for i in l])
+
 
 def get_random_chunk(split):
     filename = "training_data/train_split.txt" if split == 'train' else "training_data/val_split.txt"
@@ -43,13 +47,15 @@ def get_random_chunk(split):
             data = torch.tensor(encode(decoded_block), dtype=torch.long)
     return data
 
+
 def get_batch(split):
     data = get_random_chunk(split)
     ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
+    x = torch.stack([data[i:i + block_size] for i in ix])
+    y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
     x, y = x.to(device), y.to(device)
     return x, y
+
 
 class Head(nn.Module):
     def __init__(self, head_size):
@@ -64,13 +70,14 @@ class Head(nn.Module):
         B, T, C = x.shape
         k = self.key(x)
         q = self.query(x)
-        wei = q @ k.transpose(-2, -1) * k.shape[-1]**-0.5
+        wei = q @ k.transpose(-2, -1) * k.shape[-1] ** -0.5
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1)
         wei = self.dropout(wei)
         v = self.value(x)
         out = wei @ v
         return out
+
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
@@ -84,6 +91,7 @@ class MultiHeadAttention(nn.Module):
         out = self.dropout(self.proj(out))
         return out
 
+
 class FeedFoward(nn.Module):
     def __init__(self, n_embd):
         super().__init__()
@@ -96,6 +104,7 @@ class FeedFoward(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
 
 class Block(nn.Module):
     def __init__(self, n_embd, n_head):
@@ -112,6 +121,7 @@ class Block(nn.Module):
         y = self.ffwd(x)
         x = self.ln2(x + y)
         return x
+
 
 class GPTLanguageModel(nn.Module):
     def __init__(self, vocab_size):
@@ -158,9 +168,11 @@ class GPTLanguageModel(nn.Module):
             index = torch.cat((index, index_next), dim=1)
         return index
 
+
 # Load the model and optimizer state
 model = GPTLanguageModel(vocab_size)
 print('Loading model parameters...')
+
 try:
     with open('model-01.pkl', 'rb') as f:
         model = pickle.load(f)
@@ -168,6 +180,7 @@ try:
 except FileNotFoundError:
     print('No pre-trained model found, starting from scratch.')
 
+# Move the model to the appropriate device (GPU or CPU)
 model = model.to(device)
 
 # Initialize the optimizer, scheduler, and mixed precision scaler
@@ -191,16 +204,18 @@ def estimate_loss():
 
 # Training loop
 for iter in range(max_iters):
-    if iter % eval_iters == 0:
+    if iter % eval_interval == 0:
         print(iter)
         losses = estimate_loss()
         print(f"step: {iter}, train loss: {losses['train']:.3f}, val loss: {losses['val']:.3f}")
 
     xb, yb = get_batch('train')
 
+    # Perform the forward pass and loss computation inside the autocast context
     with torch.cuda.amp.autocast():
         logits, loss = model.forward(xb, yb)
 
+    # Zero the gradients, backpropagate the loss, and update the model parameters
     optimizer.zero_grad(set_to_none=True)
     scaler.scale(loss).backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -208,4 +223,12 @@ for iter in range(max_iters):
     scaler.update()
     scheduler.step()
 
+# Save the trained model
 torch.save(model.state_dict(), "model_320.pt")
+print('Model saved successfully!')
+
+# Example of generating text using the trained model
+prompt = 'Hello! Can you see me?'
+context = torch.tensor(encode(prompt), dtype=torch.long, device=device)
+generated_chars = decode(model.generate(context.unsqueeze(0), max_new_tokens=100)[0].tolist())
+print(generated_chars)
