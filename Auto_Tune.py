@@ -123,7 +123,6 @@ class Block(nn.Module):
         x = self.ln2(x + y)
         return x
 
-
 class GPTLanguageModel(nn.Module):
     def __init__(self, vocab_size):
         super().__init__()
@@ -186,20 +185,32 @@ def estimate_loss(model):
 
 # Hyperparameter search
 def hyperparameter_search():
-    # Define the search space
-    learning_rates = [1e-4, 3e-4, 1e-3]
-    batch_sizes = [32, 64, 128]
-    dropouts = [0.1, 0.25, 0.5]
+    # Define the search space including n_embd, n_layer, and n_head
+    learning_rates = [1e-5, 1e-4, 3e-4, 1e-3, 5e-3]
+    batch_sizes = [16, 32, 64, 128, 256]
+    dropouts = [0.1, .15, 0.25, .4, 0.5]
+    n_embds = [128, 192, 256, 320, 384, 448, 512]
+    n_layers = [6, 8, 10]
+    n_heads = [4, 8, 12]
 
     best_val_loss = float('inf')
     best_hyperparams = None
 
-    for lr, bs, dr in itertools.product(learning_rates, batch_sizes, dropouts):
-        print(f"Evaluating combination: lr={lr}, batch_size={bs}, dropout={dr}")
+    for lr, bs, dr, embd, layer, head in itertools.product(learning_rates, batch_sizes, dropouts, n_embds, n_layers, n_heads):
+        print(f"Evaluating combination: lr={lr}, batch_size={bs}, dropout={dr}, n_embd={embd}, n_layer={layer}, n_head={head}")
 
-        global batch_size, dropout
+        global batch_size, dropout, n_embd, n_layer, n_head
         batch_size = bs
         dropout = dr
+        n_embd = embd
+        n_layer = layer
+        n_head = head
+
+        # Check VRAM usage
+        vram_usage = torch.cuda.memory_allocated()
+        if vram_usage > 9.5e9:  # 9.5GB in bytes
+            print("Skipping current iteration due to excessive VRAM usage")
+            continue
 
         model = GPTLanguageModel(vocab_size).to(device)
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
@@ -214,7 +225,7 @@ def hyperparameter_search():
 
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    best_hyperparams = (lr, bs, dr)
+                    best_hyperparams = (lr, bs, dr, embd, layer, head)
                     torch.save(model.state_dict(), "best_model.pt")
 
             xb, yb = get_batch('train')
@@ -229,9 +240,10 @@ def hyperparameter_search():
             scaler.update()
             scheduler.step()
 
-        print(f"Finished combination: lr={lr}, batch_size={bs}, dropout={dr}, val_loss={val_loss:.3f}")
+        print(f"Finished combination: lr={lr}, batch_size={bs}, dropout={dr}, n_embd={embd}, n_layer={layer}, n_head={head}, val_loss={val_loss:.3f}")
 
-    print(f"Best hyperparameters found: lr={best_hyperparams[0]}, batch_size={best_hyperparams[1]}, dropout={best_hyperparams[2]} with val_loss={best_val_loss:.3f}")
+    print(f"Best hyperparameters found: lr={best_hyperparams[0]}, batch_size={best_hyperparams[1]}, dropout={best_hyperparams[2]}, n_embd={best_hyperparams[3]}, n_layer={best_hyperparams[4]}, n_head={best_hyperparams[5]} with val_loss={best_val_loss:.3f}")
+
 
 
 # Run the hyperparameter search
