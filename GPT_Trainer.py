@@ -5,22 +5,26 @@ import mmap
 import random
 import pickle
 import argparse
+import numpy as np
 
 # Check if CUDA is available and if so, set the device accordingly
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(device)
 
 # Define the parameters for the model and training
-block_size = 320
-batch_size = 32
-max_iters = 10000
-eval_interval = 500
-learning_rate = 3e-4
-eval_iters = 250
-n_embd = 256
-n_layer = 8
+block_size = 128
+batch_size = 64
+max_iters = 30100
+eval_interval = 1500
+eval_iters = 1500
+n_embd = 512
+n_layer = 10
 n_head = 8
-dropout = 0.2
+dropout = 0.3
+
+# Define the learning rates and optimizers to test
+learning_rates = [3.5e-4, 1e-4, 5e-5, 1e-5, 7e-6, 3e-5, 5e-6]  # Added more learning rates
+optimizers = ['AdamW', 'SGD', 'RMSprop', 'Adagrad']
 
 # Read characters from the vocabulary file
 chars = ""
@@ -183,11 +187,6 @@ except FileNotFoundError:
 # Move the model to the appropriate device (GPU or CPU)
 model = model.to(device)
 
-# Initialize the optimizer, scheduler, and mixed precision scaler
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_iters)
-scaler = torch.cuda.amp.GradScaler()
-
 @torch.no_grad()
 def estimate_loss():
     out = {}
@@ -202,33 +201,63 @@ def estimate_loss():
     model.train()
     return out
 
+def set_seed(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+set_seed(37)  # Ensure reproducibility
+
 # Training loop
-for iter in range(max_iters):
-    if iter % eval_interval == 0:
-        print(iter)
-        losses = estimate_loss()
-        print(f"step: {iter}, train loss: {losses['train']:.3f}, val loss: {losses['val']:.3f}")
+for optimizer_name in optimizers:
+    for learning_rate in learning_rates:
+        if optimizer_name == 'AdamW':
+            optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+        elif optimizer_name == 'SGD':
+            optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+        elif optimizer_name == 'RMSprop':
+            optimizer = torch.optim.RMSprop(model.parameters(), lr=learning_rate)
+        elif optimizer_name == 'Adagrad':
+            optimizer = torch.optim.Adagrad(model.parameters(), lr=learning_rate)
+        
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_iters)
+        scaler = torch.cuda.amp.GradScaler()
 
-    xb, yb = get_batch('train')
+        print(f"Using optimizer: {optimizer_name}, learning rate: {learning_rate}")
+        
+        previous_loss = float('inf')
+        for iter in range(max_iters):
+            if iter % eval_interval == 0:
+                losses = estimate_loss()
+                print(f"step: {iter}, train loss: {losses['train']:.3f}, val loss: {losses['val']:.3f}, lr: {learning_rate}, optimizer: {optimizer_name}")
+                
+                # Check for loss plateau
+                if losses['val'] >= previous_loss:
+                    print(f"Validation loss plateaued at step {iter}. Moving to the next optimizer/learning rate.")
+                    break
+                previous_loss = losses['val']
 
-    # Perform the forward pass and loss computation inside the autocast context
-    with torch.cuda.amp.autocast():
-        logits, loss = model.forward(xb, yb)
+            xb, yb = get_batch('train')
 
-    # Zero the gradients, backpropagate the loss, and update the model parameters
-    optimizer.zero_grad(set_to_none=True)
-    scaler.scale(loss).backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-    scaler.step(optimizer)
-    scaler.update()
-    scheduler.step()
+            with torch.cuda.amp.autocast():
+                logits, loss = model(xb, yb)
+
+            optimizer.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
 
 # Save the trained model
-torch.save(model.state_dict(), "model_320.pt")
-print('Model saved successfully!')
+with open('model-01.pkl', 'wb') as f:
+    pickle.dump(model, f)
 
 # Example of generating text using the trained model
 prompt = 'Hello! Can you see me?'
 context = torch.tensor(encode(prompt), dtype=torch.long, device=device)
 generated_chars = decode(model.generate(context.unsqueeze(0), max_new_tokens=100)[0].tolist())
 print(generated_chars)
+
