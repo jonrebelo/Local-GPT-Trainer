@@ -9,18 +9,20 @@ import re
 import numpy as np
 from pytorch_lamb import Lamb
 from torch.cuda.amp import autocast, GradScaler
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 # Check if CUDA is available and if so, set the device accordingly
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(device)
+torch.cuda.empty_cache()
 
 # Define the parameters for the model and training
-block_size = 128
+block_size = 192
 batch_size = 64
-max_iters = 11150
+max_iters = 31000
 eval_interval = 500
 eval_iters = 500
-n_embd = 512
+n_embd = 576
 n_layer = 10
 n_head = 8
 dropout = 0.3
@@ -29,6 +31,8 @@ warmup_iters = 5000
 # Define the learning rates and optimizers to test
 learning_rates = [3.5e-4, 1e-4, 5e-5, 1e-5, 7e-6, 3e-5, 5e-6]  # Added more learning rates
 optimizers = ['Lamb', 'SGD', 'AdamW', 'RMSprop', 'Adagrad']
+
+allowed_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789?!.,:; \n\t')
 
 # Read characters from the vocabulary file
 with open("training_data/vocab.txt", "r", encoding="utf-8") as f:
@@ -42,7 +46,7 @@ unwanted_chars = ''.join([
 ])
 
 # Filter out unwanted characters
-cleaned_chars = sorted(list(set(text) - set(unwanted_chars)))
+cleaned_chars = sorted(list(set(text) & allowed_chars))
 
 # Save the cleaned vocabulary
 with open("training_data/cleaned_vocab.txt", "w", encoding="utf-8") as f:
@@ -53,6 +57,7 @@ print(cleaned_chars)
 
 with open('chars.pkl', 'wb') as f:
     pickle.dump(cleaned_chars, f)
+
 string_to_int = {ch: i for i, ch in enumerate(cleaned_chars)}
 int_to_string = {i: ch for i, ch in enumerate(cleaned_chars)}
 encode = lambda s: [string_to_int.get(c, string_to_int[' ']) for c in s]  # default to space for unknown chars
@@ -61,49 +66,61 @@ decode = lambda l: ''.join([int_to_string[i] for i in l])
 def clean_text(text):
     # Remove null values
     text = text.replace('\x00', '')
-    
     # Remove URLs
     text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
-    
     # Remove HTML tags
     text = re.sub(r'<.*?>', '', text)
-    
     # Remove emojis
     text = re.sub(r'[^\w\s,]', '', text, flags=re.UNICODE)
-    
     # Remove text within brackets and the brackets
     text = re.sub(r'\[.*?\]', '', text)
-    
     # Remove specific unwanted patterns
     text = re.sub(r'node r.js -o \S+', '', text)
     text = re.sub(r'SIZE: \d+ bytes SHA1: \w+ SHA256: \w+ SHA512: \w+', '', text)
-    
     # Remove non-English characters
     text = re.sub(r'[^a-zA-Z\s]', '', text)
-    
     # Remove numbers without spaces
     text = re.sub(r'(?<!\s)\d+', '', text)
+    # Remove leading and trailing spaces
+    text = text.strip()
+    # Replace multiple spaces with a single space
+    text = ' '.join(text.split())
 
     
     return text
 
-def get_random_chunk(split, block_size, batch_size):
+def get_random_chunk(split):
     filename = "training_data/train_split.txt" if split == 'train' else "training_data/val_split.txt"
-    with open(filename, 'rb') as f:
-        with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
-            file_size = len(mm)
-            start_pos = random.randint(0, file_size - block_size * batch_size)
-            mm.seek(start_pos)
-            block = mm.read(block_size * batch_size - 1)
-            decoded_block = block.decode('utf-8', errors='ignore').replace('\r', '')
-            cleaned_block = clean_text(decoded_block)
-            data = torch.tensor(encode(cleaned_block), dtype=torch.long)
+    while True:
+        with open(filename, 'rb') as f:
+            with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                file_size = len(mm)
+                start_pos = random.randint(0, file_size - block_size * batch_size)
+                mm.seek(start_pos)
+                block = mm.read(block_size * batch_size - 1)
+                decoded_block = block.decode('utf-8', errors='ignore').replace('\r', '')
+                cleaned_block = clean_text(decoded_block)
+                
+                # Check if cleaned_block is empty
+                if cleaned_block:
+                    data = torch.tensor(encode(cleaned_block), dtype=torch.long)
+                
+                    # Ensure data length is greater than block_size
+                    if len(data) > block_size:
+                        break  # Found a suitable chunk, exit the loop
+                else:
+                    print("Cleaned block is empty, retrying...")
+    
     return data
 
 
 def get_batch(split):
     data = get_random_chunk(split)
-    ix = torch.randint(len(data) - block_size, (batch_size,))
+    
+    if len(data) <= block_size:
+        raise ValueError("Data length is less than or equal to block_size, cannot generate batch.")
+
+    ix = torch.randint(0, len(data) - block_size, (batch_size,))
     x = torch.stack([data[i:i + block_size] for i in ix])
     y = torch.stack([data[i + 1:i + block_size + 1] for i in ix])
     x, y = x.to(device), y.to(device)  # Move data to the correct device
@@ -267,8 +284,8 @@ def estimate_loss():
 
 scaler = GradScaler()
 #Initialize the optimizer to None
-optimizer = None
-
+scheduler = None
+ 
 # Outer loop for the learning rates
 for lr in learning_rates:
     # Inner loop for the optimizers
@@ -287,6 +304,8 @@ for lr in learning_rates:
 
         print(f'Current optimizer: {opt}, learning rate: {lr}')
 
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
+
         for step in range(max_iters):
             X, Y = get_batch('train')
 
@@ -297,6 +316,9 @@ for lr in learning_rates:
             # Scale the loss for mixed-precision training
             scaler.scale(loss).backward()
 
+            #gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             # Unscales the gradients and calls optimizer.step()
             scaler.step(optimizer)
 
@@ -306,6 +328,9 @@ for lr in learning_rates:
             if step % eval_interval == 0:
                 losses = estimate_loss()
                 print(f"Step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    
+                # Update learning rate scheduler based on validation loss
+                scheduler.step(losses['val'])
 
 print("Training completed.")
 
