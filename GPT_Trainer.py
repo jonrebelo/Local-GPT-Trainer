@@ -19,9 +19,9 @@ torch.cuda.empty_cache()
 # Define the parameters for the model and training
 block_size = 192
 batch_size = 64
-max_iters = 31000
-eval_interval = 500
-eval_iters = 500
+max_iters = 75100
+eval_interval = 250
+eval_iters = 250
 n_embd = 576
 n_layer = 10
 n_head = 8
@@ -238,8 +238,6 @@ class GPTLanguageModel(nn.Module):
             index = torch.cat((index, index_next), dim=1)
         return index
 
-torch.cuda.empty_cache()
-
 # Load the model and optimizer state
 model = GPTLanguageModel(vocab_size)
 print('Loading model parameters...')
@@ -282,55 +280,73 @@ def estimate_loss():
     model.train()
     return out
 
-scaler = GradScaler()
-#Initialize the optimizer to None
-scheduler = None
- 
-# Outer loop for the learning rates
-for lr in learning_rates:
-    # Inner loop for the optimizers
-    for opt in optimizers:
-        # Set the optimizer based on the current optimizer in the loop
-        if opt == 'Lamb':
-            optimizer = Lamb(model.parameters(), lr=lr)
-        elif opt == 'SGD':
-            optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-        elif opt == 'AdamW':
-            optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
-        elif opt == 'RMSprop':
-            optimizer = torch.optim.RMSprop(model.parameters(), lr=lr)
-        elif opt == 'Adagrad':
-            optimizer = torch.optim.Adagrad(model.parameters(), lr=lr)
-
-        print(f'Current optimizer: {opt}, learning rate: {lr}')
-
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
-
-        for step in range(max_iters):
-            X, Y = get_batch('train')
-
-            # Perform the forward pass and calculate loss under autocast
-            with autocast():
-                logits, loss = model(X, Y)
-
-            # Scale the loss for mixed-precision training
-            scaler.scale(loss).backward()
-
-            #gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            # Unscales the gradients and calls optimizer.step()
-            scaler.step(optimizer)
-
-            # Updates the scale for next iteration
-            scaler.update()
-
-            if step % eval_interval == 0:
-                losses = estimate_loss()
-                print(f"Step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+def get_optimizer(name, parameters, learning_rate):
+    if name == 'Lamb':
+        return Lamb(parameters, lr=learning_rate)
+    elif name == 'SGD':
+        return torch.optim.SGD(parameters, lr=learning_rate)
+    elif name == 'AdamW':
+        return torch.optim.AdamW(parameters, lr=learning_rate)
+    elif name == 'RMSprop':
+        return torch.optim.RMSprop(parameters, lr=learning_rate)
+    elif name == 'Adagrad':
+        return torch.optim.Adagrad(parameters, lr=learning_rate)
+    else:
+        raise ValueError(f"Unknown optimizer: {name}")
     
-                # Update learning rate scheduler based on validation loss
-                scheduler.step(losses['val'])
+best_loss = float('inf')
+current_optimizer_idx = 0
+current_lr_idx = 0
+
+current_optimizer = get_optimizer(optimizers[current_optimizer_idx], model.parameters(), learning_rates[current_lr_idx])
+scheduler = ReduceLROnPlateau(current_optimizer, mode='min', factor=0.5, patience=3, verbose=True)
+scaler = GradScaler()
+
+# Training loop
+for step in range(max_iters):
+    X, Y = get_batch('train')
+
+    # Perform the forward pass and calculate loss under autocast
+    with autocast():
+        logits, loss = model(X, Y)
+
+    # Scale the loss for mixed-precision training
+    scaler.scale(loss).backward()
+
+    # Gradient clipping
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+    # Unscale the gradients and call optimizer.step()
+    scaler.step(current_optimizer)
+
+    # Update the scale for next iteration
+    scaler.update()
+
+    # Zero the gradients
+    current_optimizer.zero_grad()
+    
+    if step % eval_interval == 0:
+        losses = estimate_loss()
+        print(f"Step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+        # Update learning rate scheduler based on validation loss
+        scheduler.step(losses['val'])
+
+        # Check if loss has plateaued
+        if scheduler.num_bad_epochs >= scheduler.patience:
+            current_lr_idx += 1
+            if current_lr_idx >= len(learning_rates):
+                current_lr_idx = 0
+                current_optimizer_idx = (current_optimizer_idx + 1) % len(optimizers)
+
+            new_optimizer_name = optimizers[current_optimizer_idx]
+            new_lr = learning_rates[current_lr_idx]
+            print(f"Switching to optimizer: {new_optimizer_name}, learning rate: {new_lr}")
+
+            # Initialize new optimizer and scheduler
+            current_optimizer = get_optimizer(new_optimizer_name, model.parameters(), new_lr)
+            scheduler = ReduceLROnPlateau(current_optimizer, mode='min', factor=0.5, patience=3, verbose=True)
+
 
 print("Training completed.")
 
