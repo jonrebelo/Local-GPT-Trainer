@@ -22,17 +22,16 @@ block_size = 128
 batch_size = 32
 max_iters = 20100
 eval_interval = 500
-eval_iters = 576
-n_embd = 512
+eval_iters = 500
+n_embd = 576
 n_layer = 12
 n_head = 10
-dropout = 0.3
+dropout = 0.2
 
 # Define the learning rates and optimizers to test
-learning_rates = [3.5e-4, 1e-4, 5e-4]
+learning_rates = [1e-4]
 optimizer_dict = {
     'AdamW': torch.optim.AdamW,
-    'LAMB': Lamb, 
 }
 
 # Function to encode text using subword tokenizer
@@ -192,37 +191,60 @@ def set_seed(seed):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
+
 def freeze_layers(model, layers_to_freeze):
     for name, param in model.named_parameters():
         if any(layer_name in name for layer_name in layers_to_freeze):
             param.requires_grad = False
+            print(f"Freezing parameter: {name}")
 
 def prune_layers(model, layers_to_prune, amount):
     for name, module in model.named_modules():
         if any(layer_name in name for layer_name in layers_to_prune):
-            prune.l1_unstructured(module, name='weight', amount=amount)
+            for _, param in module.named_parameters():
+                prune.l1_unstructured(param, name='weight', amount=amount)
+                print(f"Pruning parameter in module {name} with amount: {amount}")
+
+# Specify layers to freeze and prune
+layers_to_freeze = ['block.0', 'block.1', 'block.2', 'block.3']
+layers_to_prune = ['block.4', 'block.5', 'block.6', 'block.7']
+prune_amount = 0.2
 
 # Function to train the model
 
-def train_model(epochs):
+def train_model(epochs, learning_rates=learning_rates, optimizer_dict=optimizer_dict, checkpoint_path='model_checkpoint_epoch_20.pt', layers_to_freeze=[], layers_to_prune=[], prune_amount=0.2):
     set_seed(42)  # Set seed for reproducibility
     best_val_loss = float('inf')
     best_config = None
 
     for lr in learning_rates:
         for optimizer_name in optimizer_dict:
+            # Initialize model
             model = GPTLanguageModel(vocab_size).to(device)
+            freeze_layers(model, layers_to_freeze)
+            print(f"Freezing parameter: {layers_to_freeze}")
+            
+            # Prune specified layers
+            prune_layers(model, layers_to_prune, prune_amount)
+            print(f"Pruning parameter in module {layers_to_prune} with amount: {prune_amount}")
+            
             optimizer_class = optimizer_dict[optimizer_name]
-            optimizer = optimizer_class(model.parameters(), lr=lr, weight_decay=0.01)
-            scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5 * eval_interval // eval_iters, min_lr=1e-6)
+            optimizer = optimizer_class(model.parameters(), lr=lr, weight_decay=0.005)
+            scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1, min_lr=1e-6)
 
+            # Load checkpoint if it exists
+            start_epoch = 1
+            if os.path.exists(checkpoint_path):
+                start_epoch, best_val_loss = load_checkpoint(model, optimizer, checkpoint_path)
+            else:
+                print("No Checkpoint Found")
 
             print(f"Training with optimizer: {optimizer_name}, learning rate: {lr}")
 
             scaler = GradScaler()
             plateau_count = 0
 
-            for epoch in range(1, epochs + 1):
+            for epoch in range(start_epoch, epochs + 1):
                 model.train()
                 total_loss = 0.0
 
@@ -234,6 +256,7 @@ def train_model(epochs):
                         logits, loss = model(inputs, targets)  # Forward pass
 
                     scaler.scale(loss).backward()  # Backward pass with scaling
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # Gradient clipping
                     scaler.step(optimizer)  # Optimizer step
                     scaler.update()  # Update scaler
                     total_loss += loss.item()
@@ -255,26 +278,17 @@ def train_model(epochs):
                         else:
                             plateau_count += 1
 
-                             #If no improvement after patience iterations, break the inner loop
-                            if plateau_count >= scheduler.patience:
-                                print(f"Validation loss plateaued for {scheduler.patience * eval_iters} iterations. "
-                                      f"Switching to next configuration.")
-                                break
-
                 # Adjust learning rate based on validation loss
                 scheduler.step(val_loss)
                 current_lr = optimizer.param_groups[0]['lr']
                 print(f"Current learning rate: {current_lr:.8f}")
 
                 # Save model checkpoint after each epoch
-                save_checkpoint(model, optimizer, epoch, val_loss)
-
-                # Check if validation loss is already plateaued
-                if plateau_count >= scheduler.patience:
-                    break
+                save_checkpoint(model, optimizer, epoch, val_loss, checkpoint_path)
 
     print(f"Best configuration found - Optimizer: {best_config[0]}, Learning Rate: {best_config[1]}, "
           f"Validation Loss: {best_val_loss:.4f}")
+
 
 # Function to evaluate the model on validation set
 def evaluate_model(model):
@@ -290,7 +304,7 @@ def evaluate_model(model):
     return total_loss / eval_iters
 
 # Function to save model checkpoint
-def save_checkpoint(model, optimizer, epoch, val_loss):
+def save_checkpoint(model, optimizer, epoch, val_loss, checkpoint_path):
     checkpoint = {
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
@@ -301,5 +315,15 @@ def save_checkpoint(model, optimizer, epoch, val_loss):
     torch.save(checkpoint, f'model_checkpoint_epoch_{epoch}.pt')
     print(f"Checkpoint saved for epoch {epoch} with validation loss {val_loss:.4f}")
 
+def load_checkpoint(model, optimizer, checkpoint_path='checkpoint.pth'):
+        checkpoint = torch.load(checkpoint_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        val_loss = checkpoint['val_loss']
+        print(f"Checkpoint loaded. Resuming from epoch {start_epoch} with validation loss {val_loss:.4f}")
+        return start_epoch, val_loss
+
+    
 # Example usage to train the model
-train_model(epochs=10)
+train_model(epochs=50)
