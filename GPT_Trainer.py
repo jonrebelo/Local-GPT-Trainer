@@ -30,7 +30,7 @@ warmup_iters = 5000
 
 # Define the learning rates and optimizers to test
 learning_rates = [3.5e-4, 1e-4, 5e-5, 1e-5, 7e-6, 3e-5, 5e-6]  # Added more learning rates
-optimizers = ['Lamb', 'SGD', 'AdamW', 'RMSprop', 'Adagrad']
+optimizers = [ 'SGD', 'AdamW', 'RMSprop', 'Adagrad']
 
 allowed_chars = set('abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789?!.,:; \n\t')
 
@@ -85,6 +85,13 @@ def clean_text(text):
     text = text.strip()
     # Replace multiple spaces with a single space
     text = ' '.join(text.split())
+
+    # Remove Wikipedia section headers
+    text = re.sub(r'==.*?==', '', text)
+    # Remove Wikipedia links
+    text = re.sub(r'\[\[.*?\]\]', '', text)
+    # Remove Wikipedia templates
+    text = re.sub(r'{{.*?}}', '', text)
 
     
     return text
@@ -302,6 +309,10 @@ current_optimizer = get_optimizer(optimizers[current_optimizer_idx], model.param
 scheduler = ReduceLROnPlateau(current_optimizer, mode='min', factor=0.5, patience=3, verbose=True)
 scaler = GradScaler()
 
+patience = 5  # Number of cycles through all learning rates and optimizers before stopping if no improvement
+best_val_loss = float('inf')
+no_improvement_count = 0
+
 # Training loop
 for step in range(max_iters):
     X, Y = get_batch('train')
@@ -332,12 +343,24 @@ for step in range(max_iters):
         # Update learning rate scheduler based on validation loss
         scheduler.step(losses['val'])
 
-        # Check if loss has plateaued
+        # Check if the current validation loss is the best we've seen
+        if losses['val'] < best_val_loss:
+            best_val_loss = losses['val']
+            no_improvement_count = 0  # Reset the no improvement count
+        else:
+            no_improvement_count += 1  # Increment the no improvement count
+
+        # Check if we've cycled through all optimizers and learning rates without improvement
         if scheduler.num_bad_epochs >= scheduler.patience:
             current_lr_idx += 1
             if current_lr_idx >= len(learning_rates):
                 current_lr_idx = 0
                 current_optimizer_idx = (current_optimizer_idx + 1) % len(optimizers)
+
+                # Check for early stopping
+                if no_improvement_count >= patience:
+                    print("Early stopping triggered. No improvement for multiple cycles.")
+                    break
 
             new_optimizer_name = optimizers[current_optimizer_idx]
             new_lr = learning_rates[current_lr_idx]
@@ -347,8 +370,8 @@ for step in range(max_iters):
             current_optimizer = get_optimizer(new_optimizer_name, model.parameters(), new_lr)
             scheduler = ReduceLROnPlateau(current_optimizer, mode='min', factor=0.5, patience=3, verbose=True)
 
-
 print("Training completed.")
+
 
 # Save the model
 with open('model-01.pkl', 'wb') as f:
