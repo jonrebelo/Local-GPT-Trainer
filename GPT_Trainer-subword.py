@@ -9,8 +9,9 @@ import numpy as np
 from pytorch_lamb import Lamb
 from torch.cuda.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from transformers import GPT2Tokenizer, GPT2Model
-import re
+from transformers import GPT2TokenizerFast 
+from torch.optim import AdamW
+
 
 # Check if CUDA is available and if so, set the device accordingly
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -19,19 +20,20 @@ torch.cuda.empty_cache()
 
 # Define the parameters for the model and training
 block_size = 128
-batch_size = 32
+batch_size = 24
 max_iters = 20100
 eval_interval = 500
 eval_iters = 500
-n_embd = 576
-n_layer = 12
-n_head = 10
-dropout = 0.2
+n_embd = 640
+n_layer = 14
+n_head = 14
+dropout = 0.20
 
 # Define the learning rates and optimizers to test
-learning_rates = [1e-4]
+learning_rates = [1e-4, 5e-5, 2e-5]
 optimizer_dict = {
-    'AdamW': torch.optim.AdamW,
+    'AdamW': AdamW,
+    'Lamb': Lamb,
 }
 
 # Function to encode text using subword tokenizer
@@ -40,8 +42,10 @@ def encode_text(text, tokenizer):
     return encoded
 
 # Load existing tokenizer
-tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
 vocab_size = tokenizer.vocab_size
+
+
 
 # Function to get a random chunk of encoded data from train_split.txt or val_split.txt
 def get_random_chunk(split):
@@ -55,7 +59,7 @@ def get_random_chunk(split):
             decoded_block = block.decode('utf-8', errors='ignore').replace('\r', '')
 
             # Tokenize and encode the text
-            encoded_block = encode_text(decoded_block[:1024], tokenizer)  # Truncate to maximum length
+            encoded_block = tokenizer.encode(decoded_block[:1024], return_tensors='pt').squeeze(0)  # Truncate to maximum length
 
             if encoded_block.size(0) > block_size:
                 return encoded_block
@@ -175,12 +179,30 @@ class GPTLanguageModel(nn.Module):
 
     def generate(self, index, max_new_tokens):
         for _ in range(max_new_tokens):
+            # Print shape of index for debugging
+            print(f"Index shape: {index.shape}")  # Check the shape
+
+            # Ensure index has batch dimension if it's missing
+            if index.dim() == 1:
+                index = index.unsqueeze(0)  # Add batch dimension if missing
+                print(f"After unsqueezing, Index shape: {index.shape}")  # Check the shape after unsqueezing
+
+            # Ensure index has the correct shape for slicing
+            if index.dim() != 2:
+                raise ValueError(f"Unexpected index shape: {index.shape}. Expected 2-dimensional tensor.")
+
+            # Slice the index to get the last block_size tokens
             index_cond = index[:, -block_size:]
+
+            # Forward pass to generate the next token
             logits, loss = self.forward(index_cond)
             logits = logits[:, -1, :]
             probs = F.softmax(logits, dim=-1)
             index_next = torch.multinomial(probs, num_samples=1)
+
+            # Concatenate the generated token to index for the next iteration
             index = torch.cat((index, index_next), dim=1)
+
         return index
 
 # Function to set seed for reproducibility
@@ -194,26 +216,30 @@ def set_seed(seed):
 
 def freeze_layers(model, layers_to_freeze):
     for name, param in model.named_parameters():
-        if any(layer_name in name for layer_name in layers_to_freeze):
-            param.requires_grad = False
-            print(f"Freezing parameter: {name}")
+        for layer_name in layers_to_freeze:
+            if layer_name in name:
+                param.requires_grad = False
+                print(f"Freezing parameter: {name}")
+
 
 def prune_layers(model, layers_to_prune, amount):
     for name, module in model.named_modules():
-        if any(layer_name in name for layer_name in layers_to_prune):
-            for _, param in module.named_parameters():
-                prune.l1_unstructured(param, name='weight', amount=amount)
-                print(f"Pruning parameter in module {name} with amount: {amount}")
+        for layer_name in layers_to_prune:
+            if layer_name in name:
+                for name, param in module.named_parameters():
+                    prune.l1_unstructured(param, amount=amount)
+                    print(f"Pruning parameter in module {name} with amount: {amount}")
+
 
 # Specify layers to freeze and prune
-layers_to_freeze = ['block.0', 'block.1', 'block.2', 'block.3']
-layers_to_prune = ['block.4', 'block.5', 'block.6', 'block.7']
+layers_to_freeze = ['blocks.0', 'blocks.1', 'blocks.2', 'blocks.3']
+layers_to_prune = ['blocks.4', 'blocks.5', 'blocks.6', 'blocks.7']
 prune_amount = 0.2
 
 # Function to train the model
 
-def train_model(epochs, learning_rates=learning_rates, optimizer_dict=optimizer_dict, checkpoint_path='model_checkpoint_epoch_20.pt', layers_to_freeze=[], layers_to_prune=[], prune_amount=0.2):
-    set_seed(42)  # Set seed for reproducibility
+def train_model(epochs, learning_rates=learning_rates, optimizer_dict=optimizer_dict, checkpoint_path='model_checkpoint_epoch_27.pt', layers_to_freeze=[], layers_to_prune=[], prune_amount=0.2):
+    set_seed(37)  # Set seed for reproducibility
     best_val_loss = float('inf')
     best_config = None
 
@@ -221,16 +247,13 @@ def train_model(epochs, learning_rates=learning_rates, optimizer_dict=optimizer_
         for optimizer_name in optimizer_dict:
             # Initialize model
             model = GPTLanguageModel(vocab_size).to(device)
-            freeze_layers(model, layers_to_freeze)
-            print(f"Freezing parameter: {layers_to_freeze}")
-            
-            # Prune specified layers
-            prune_layers(model, layers_to_prune, prune_amount)
-            print(f"Pruning parameter in module {layers_to_prune} with amount: {prune_amount}")
-            
+            #freeze_layers(model, layers_to_freeze)
+            #prune_layers(model, layers_to_prune, prune_amount)
+            #model.apply(prune.remove)
+
             optimizer_class = optimizer_dict[optimizer_name]
             optimizer = optimizer_class(model.parameters(), lr=lr, weight_decay=0.005)
-            scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=1, min_lr=1e-6)
+            scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, min_lr=1e-6)
 
             # Load checkpoint if it exists
             start_epoch = 1
@@ -242,7 +265,7 @@ def train_model(epochs, learning_rates=learning_rates, optimizer_dict=optimizer_
             print(f"Training with optimizer: {optimizer_name}, learning rate: {lr}")
 
             scaler = GradScaler()
-            plateau_count = 0
+            early_stopping_patience = 5  # Adjusted early stopping patience
 
             for epoch in range(start_epoch, epochs + 1):
                 model.train()
@@ -268,7 +291,7 @@ def train_model(epochs, learning_rates=learning_rates, optimizer_dict=optimizer_
                               f"Train Loss: {total_loss / eval_interval:.4f}, Val Loss: {val_loss:.4f}")
                         total_loss = 0.0
 
-                        #Check if validation loss has improved
+                        # Check if validation loss has improved
                         if val_loss < best_val_loss:
                             best_val_loss = val_loss
                             best_config = (optimizer_name, lr)
@@ -278,6 +301,20 @@ def train_model(epochs, learning_rates=learning_rates, optimizer_dict=optimizer_
                         else:
                             plateau_count += 1
 
+                        # Early stopping condition
+                        if plateau_count >= early_stopping_patience:
+                            print(f"Stopping early at epoch {epoch} due to no improvement in validation loss.")
+                            break  # Exit inner loop, go to next optimizer or LR
+
+                # Generate test prompts after each epoch
+                print(f"\nGenerating test prompts after epoch {epoch}:")
+                for _ in range(3):  # Generate 3 test prompts
+                    starting_prompt = "The protagonist"
+                    starting_token = encode_text(starting_prompt, tokenizer).to(device)
+                    generated_sequence = model.generate(starting_token, max_new_tokens=100)
+                    generated_text = tokenizer.decode(generated_sequence[0].tolist(), skip_special_tokens=True)
+                    print(f"Prompt: '{starting_prompt}'\nGenerated Text: '{generated_text}'\n")
+
                 # Adjust learning rate based on validation loss
                 scheduler.step(val_loss)
                 current_lr = optimizer.param_groups[0]['lr']
@@ -285,6 +322,14 @@ def train_model(epochs, learning_rates=learning_rates, optimizer_dict=optimizer_
 
                 # Save model checkpoint after each epoch
                 save_checkpoint(model, optimizer, epoch, val_loss, checkpoint_path)
+
+                # Check for early stopping
+                if plateau_count >= early_stopping_patience:
+                    break  # Exit outer loop, stop training early
+
+            if plateau_count < early_stopping_patience:
+                print(f"Completed training for optimizer: {optimizer_name}, learning rate: {lr}, "
+                      f"Best validation loss: {best_val_loss:.4f}\n")
 
     print(f"Best configuration found - Optimizer: {best_config[0]}, Learning Rate: {best_config[1]}, "
           f"Validation Loss: {best_val_loss:.4f}")
