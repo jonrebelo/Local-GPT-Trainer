@@ -9,7 +9,9 @@
 
 ## Environment:
 conda install matplotlib numpy ipykernel jupyter tqdm transformers multiprocessing
+
 conda install pytorch pytorch-cuda=12.1 -c pytorch -c nvidia
+
 pip install pylzma pytorch-lamb
 
 ## Instructions
@@ -55,11 +57,11 @@ python main.py
 
 This pre-trains a GPT model with your selected dataset. Clean data is essential for optimal performance, and various optimizers and learning rates can be added to enhance the model's effectiveness.
 
-    CUDA Training: CUDA is the preferred method for training due to its efficiency with GPU. Training on CPU is not recommended.
-    Tokenizer:
-        GPT_Trainer-subword: Subword tokenizer from HuggingFace.
-        GPT_Trainer_c-level: Character-level encoding tokenizer.
-    Parameter Customization: Parameters need to be tailored to the user's specific GPU for optimal performance.
+CUDA Training: CUDA is the preferred method for training due to its efficiency with GPU. Training on CPU is not recommended.
+Tokenizer:
+    GPT_Trainer-subword: Subword tokenizer from HuggingFace.
+    GPT_Trainer_c-level: Character-level encoding tokenizer.
+Parameter Customization: Parameters need to be tailored to the user's specific GPU for optimal performance.
 
 ##### Model Description
 
@@ -67,10 +69,10 @@ The model is a GPT-based language model utilizing multi-head attention and feed-
 
 ###### Features
 
-    Optional Layer Freezing: Freeze certain layers during fine-tuning to speed up training and potentially improve performance.
-    Early Stopping: Stop training early if the model's performance ceases to improve.
-    Checkpoints: Save model checkpoints during training to prevent loss of progress.
-    GPT_Trainers both take advantage of tensor cores in nVidia GPUs with Pythorch's Automatic Mixed Precision (AMP) to accelerate deep learning training. Requires an nVidia RTX card for this additional accleration. 
-    Learning Rate and Optimizer Iteration: Iterate through different learning rates and optimizers using a scheduler to find the best configuration.
-    Data Cleanser: Data_Cleanser.py script performs basic cleaning of datasets, removing unwanted characters and formatting text.
-    Training and Validation Split: train_val_seperator.py script splits datasets into training and validation sets. Ensure data is cleaned before splitting.
+- Optional Layer Freezing: Freeze certain layers during fine-tuning to speed up training and potentially improve performance.
+- Early Stopping: Stop training early if the model's performance ceases to improve.
+- Checkpoints: Save model checkpoints during training to prevent loss of progress.
+- GPT_Trainers both take advantage of tensor cores in nVidia GPUs with Pythorch's Automatic Mixed Precision (AMP) to accelerate deep learning training. Requires an nVidia RTX card for this additional accleration. 
+- Learning Rate and Optimizer Iteration: Iterate through different learning rates and optimizers using a scheduler to find the best configuration.
+- Data Cleanser: Data_Cleanser.py script performs basic cleaning of datasets, removing unwanted characters and formatting text.
+- Training and Validation Split: train_val_seperator.py script splits datasets into training and validation sets. Ensure data is cleaned before splitting.
