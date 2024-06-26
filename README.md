@@ -30,7 +30,7 @@ Use the provided data cleanser to clean your data and split it into training and
 The `train_val_seperator.py` script will split the data into two files: `train_split.txt` and `val_split.txt`.
 
 ### Step 3: Configure Training Parameters
-Edit the main script (`main.py`) to set your training parameters such as block size, batch size, number of layers, and learning rates. Ensure your parameters match your hardware capabilities.
+Edit the main script (`GPT_Trainer-subword.py` or `GPT_Trainer_c-level.py`) to set your training parameters such as block size, batch size, number of layers, and learning rates. Ensure your parameters match your hardware capabilities.
 
 This did well for an RTX 3080 with 10GB of VRAM, but your mileage will vary drastically based on VRAM and GPU performance.
 
