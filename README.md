@@ -50,7 +50,12 @@ dropout = 0.25
 Run the main training script. The script will automatically handle training, evaluation, and checkpointing.
 
 ```bash
-python main.py
+python GPT_Trainer-subword.py
+```
+or 
+
+```bash
+GPT_Trainer_c-level.py
 ```
 
 #### Description
